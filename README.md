@@ -108,6 +108,4 @@ No cap on source files. Link with `-lm -lpthread -lasound`.
 
 USB mics usually just appear as `hw:1,0` after `arecord -l`. Onboard audio on H618 boards is hit-or-miss; if `arecord -l` is empty, use WAV or the synth. Capture is mono S16 at 16 kHz.
 
-## License of this tree
 
-Written for your deck. FFT, font, and mapper are original and tiny.
