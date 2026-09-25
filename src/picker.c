@@ -11,10 +11,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static int is_wav_name(const char *n) {
+static int is_audio_name(const char *n) {
     const char *dot = strrchr(n, '.');
     if (!dot) return 0;
-    return !strcasecmp(dot, ".wav") || !strcasecmp(dot, ".wave");
+    return !strcasecmp(dot, ".wav") || !strcasecmp(dot, ".wave") ||
+           !strcasecmp(dot, ".mp3");
 }
 
 static int cmp_item(const void *a, const void *b) {
@@ -53,7 +54,7 @@ void picker_rescan(Picker *p) {
         if (stat(full, &st) != 0) continue;
         if (S_ISDIR(st.st_mode))
             add_item(p, PICK_DIR, de->d_name, full);
-        else if (S_ISREG(st.st_mode) && is_wav_name(de->d_name))
+        else if (S_ISREG(st.st_mode) && is_audio_name(de->d_name))
             add_item(p, PICK_WAV, de->d_name, full);
     }
     closedir(d);
@@ -66,7 +67,7 @@ void picker_rescan(Picker *p) {
         if (p->items[i].kind == PICK_WAV) wavs++;
         if (p->items[i].kind == PICK_DIR) dirs++;
     }
-    snprintf(p->status, sizeof(p->status), "%d wav  %d dir   enter=open  o=this screen", wavs, dirs);
+    snprintf(p->status, sizeof(p->status), "%d files  %d dir   enter=open  o=picker", wavs, dirs);
 }
 
 void picker_init(Picker *p, const char *start_dir) {
@@ -172,7 +173,11 @@ void draw_picker(Fb *fb, const Picker *p) {
         const char *tag = "   ";
         if (it->kind == PICK_MIC) { col = acc;  tag = "mic"; }
         if (it->kind == PICK_DIR) { col = dirc; tag = "dir"; }
-        if (it->kind == PICK_WAV) { col = wavc; tag = "wav"; }
+        if (it->kind == PICK_WAV) {
+            const char *dot = strrchr(it->name, '.');
+            tag = (dot && !strcasecmp(dot, ".mp3")) ? "mp3" : "wav";
+            col = wavc;
+        }
         if (selected) col = rgb565(255, 255, 255);
 
         char line[88];
@@ -182,7 +187,7 @@ void draw_picker(Fb *fb, const Picker *p) {
     }
 
     if (p->count == 1)
-        draw_text(fb, pad, top + row_h, "no .wav in this folder", muted);
+        draw_text(fb, pad, top + row_h, "no .wav/.mp3 in this folder", muted);
 
     draw_text(fb, pad, fb->h - ui(fb, 10), p->status, muted);
 }

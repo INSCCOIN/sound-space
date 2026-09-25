@@ -7,6 +7,10 @@
 #include <ctype.h>
 #include <strings.h>
 
+#define MINIMP3_IMPLEMENTATION
+#define MINIMP3_ONLY_MP3
+#include "minimp3.h"
+
 #ifdef HAVE_ALSA
 /*
  * WalnutOS / older alsa-lib: asoundlib.h pulls time.h (glibc timespec)
@@ -41,6 +45,15 @@ struct Audio {
     /* synth */
     double t;
     int phrase;
+    /* mp3 */
+    uint8_t *mp3;
+    size_t mp3_size;
+    size_t mp3_off;
+    size_t mp3_start;
+    mp3dec_t mp3dec;
+    int16_t mp3_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+    int mp3_frame_len;
+    int mp3_frame_pos;
     /* alsa */
 #ifdef HAVE_ALSA
     snd_pcm_t *pcm;
@@ -149,6 +162,116 @@ static int wav_read(Audio *a, float *dst, int n) {
     return n;
 }
 
+static size_t skip_id3(const uint8_t *b, size_t n) {
+    if (n < 10) return 0;
+    if (b[0] != 'I' || b[1] != 'D' || b[2] != '3') return 0;
+    size_t size = ((size_t)(b[6] & 0x7f) << 21) |
+                  ((size_t)(b[7] & 0x7f) << 14) |
+                  ((size_t)(b[8] & 0x7f) << 7) |
+                  ((size_t)(b[9] & 0x7f));
+    size += 10;
+    if (b[5] & 0x10) size += 10; /* footer */
+    if (size > n) size = n;
+    return size;
+}
+
+static int mp3_decode_one(Audio *a) {
+    for (;;) {
+        if (a->mp3_off >= a->mp3_size) {
+            a->mp3_off = a->mp3_start;
+            mp3dec_init(&a->mp3dec);
+            if (a->mp3_off >= a->mp3_size) return -1;
+        }
+        mp3dec_frame_info_t info;
+        memset(&info, 0, sizeof(info));
+        int left = (int)(a->mp3_size - a->mp3_off);
+        int samples = mp3dec_decode_frame(&a->mp3dec,
+                                          a->mp3 + a->mp3_off, left,
+                                          a->mp3_pcm, &info);
+        if (info.frame_bytes > 0)
+            a->mp3_off += (size_t)info.frame_bytes;
+        else
+            a->mp3_off += 1; /* hunt sync */
+        if (samples > 0) {
+            if (info.channels > 0) a->channels = info.channels;
+            if (info.hz > 0) {
+                a->src_rate = info.hz;
+                a->step = (double)a->src_rate / (double)SS_SR;
+            }
+            a->mp3_frame_len = samples; /* per channel */
+            a->mp3_frame_pos = 0;
+            return 0;
+        }
+        if (a->mp3_off >= a->mp3_size) {
+            a->mp3_off = a->mp3_start;
+            mp3dec_init(&a->mp3dec);
+            return -1;
+        }
+    }
+}
+
+static float mp3_next_src(Audio *a) {
+    if (a->mp3_frame_pos >= a->mp3_frame_len) {
+        if (mp3_decode_one(a) != 0) return 0;
+    }
+    int ch = a->channels > 0 ? a->channels : 1;
+    int idx = a->mp3_frame_pos * ch;
+    float acc = 0;
+    for (int c = 0; c < ch; c++)
+        acc += (float)a->mp3_pcm[idx + c] / 32768.0f;
+    a->mp3_frame_pos++;
+    return acc / (float)ch;
+}
+
+static int mp3_read(Audio *a, float *dst, int n) {
+    for (int i = 0; i < n; i++) {
+        while (a->pos_frac >= 1.0) {
+            a->hold = mp3_next_src(a);
+            a->pos_frac -= 1.0;
+        }
+        dst[i] = a->hold;
+        a->pos_frac += a->step;
+    }
+    return n;
+}
+
+static int mp3_open(Audio *a, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz <= 0 || sz > 48L * 1024 * 1024) { fclose(f); return -1; }
+    rewind(f);
+    uint8_t *buf = malloc((size_t)sz);
+    if (!buf) { fclose(f); return -1; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf); fclose(f); return -1;
+    }
+    fclose(f);
+
+    a->mp3 = buf;
+    a->mp3_size = (size_t)sz;
+    a->mp3_start = skip_id3(buf, (size_t)sz);
+    a->mp3_off = a->mp3_start;
+    mp3dec_init(&a->mp3dec);
+    a->channels = 2;
+    a->src_rate = 44100;
+    a->step = (double)a->src_rate / (double)SS_SR;
+    a->mp3_frame_len = 0;
+    a->mp3_frame_pos = 0;
+
+    if (mp3_decode_one(a) != 0) {
+        free(a->mp3);
+        a->mp3 = NULL;
+        return -1;
+    }
+    a->kind = AUDIO_MP3;
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    snprintf(a->label, sizeof(a->label), "mp3 %dHz %s", a->src_rate, base);
+    return 0;
+}
+
 /* Built-in demo: sweeping chirps + trills so the mapper has something to eat. */
 static int synth_read(Audio *a, float *dst, int n) {
     for (int i = 0; i < n; i++) {
@@ -241,6 +364,13 @@ static int looks_like_wav(const char *p) {
     return !strcasecmp(dot, ".wav") || !strcasecmp(dot, ".wave");
 }
 
+static int looks_like_mp3(const char *p) {
+    if (!p) return 0;
+    const char *dot = strrchr(p, '.');
+    if (!dot) return 0;
+    return !strcasecmp(dot, ".mp3");
+}
+
 Audio *audio_open(const char *path_or_device, int want_alsa) {
     Audio *a = calloc(1, sizeof(*a));
     if (!a) {
@@ -252,9 +382,18 @@ Audio *audio_open(const char *path_or_device, int want_alsa) {
     g_err[0] = 0;
 
     if (path_or_device && *path_or_device && !want_alsa) {
+        if (looks_like_mp3(path_or_device)) {
+            if (mp3_open(a, path_or_device) == 0)
+                return a;
+            snprintf(g_err, sizeof(g_err), "cannot decode MP3: %s", path_or_device);
+            free(a);
+            return NULL;
+        }
         if (wav_open(a, path_or_device) == 0)
             return a;
-        snprintf(g_err, sizeof(g_err), "not a PCM WAV: %s", path_or_device);
+        if (mp3_open(a, path_or_device) == 0)
+            return a;
+        snprintf(g_err, sizeof(g_err), "not a WAV/MP3: %s", path_or_device);
         free(a);
         return NULL;
     }
@@ -274,10 +413,10 @@ Audio *audio_open(const char *path_or_device, int want_alsa) {
     }
 
     if (path_or_device && *path_or_device) {
-        if (looks_like_wav(path_or_device) || wav_open(a, path_or_device) == 0) {
-            if (a->kind == AUDIO_WAV)
-                return a;
-        }
+        if (wav_open(a, path_or_device) == 0)
+            return a;
+        if (mp3_open(a, path_or_device) == 0)
+            return a;
 #ifdef HAVE_ALSA
         if (alsa_open(a, path_or_device) == 0)
             return a;
@@ -295,6 +434,7 @@ Audio *audio_open(const char *path_or_device, int want_alsa) {
 void audio_close(Audio *a) {
     if (!a) return;
     if (a->fp) fclose(a->fp);
+    if (a->mp3) free(a->mp3);
 #ifdef HAVE_ALSA
     if (a->pcm) snd_pcm_close(a->pcm);
 #endif
@@ -305,6 +445,7 @@ int audio_read(Audio *a, float *dst, int n) {
     if (!a) return 0;
     switch (a->kind) {
         case AUDIO_WAV:   return wav_read(a, dst, n);
+        case AUDIO_MP3:   return mp3_read(a, dst, n);
         case AUDIO_SYNTH: return synth_read(a, dst, n);
 #ifdef HAVE_ALSA
         case AUDIO_ALSA:  return alsa_read(a, dst, n);

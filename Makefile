@@ -52,13 +52,13 @@ check-arch:
 	    case "$(HOST_ARCH)" in \
 	      aarch64|arm64) \
 	        echo "$$desc" | grep -qi 'x86-64\|Intel 80386\|EM: 62' && \
-	          echo "dropping foreign object $$o" && rm -f $$o ;; \
+	          echo "dropping foreign object $$o" && rm -f $$o || true ;; \
 	      x86_64|amd64|i686) \
 	        echo "$$desc" | grep -qi 'ARM\|aarch64\|EM: 183' && \
-	          echo "dropping foreign object $$o" && rm -f $$o ;; \
+	          echo "dropping foreign object $$o" && rm -f $$o || true ;; \
 	    esac; \
 	  fi; \
-	done
+	done; true
 
 $(BIN): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS)

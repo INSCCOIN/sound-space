@@ -7,13 +7,13 @@ typedef enum {
     AUDIO_NONE = 0,
     AUDIO_SYNTH,
     AUDIO_WAV,
+    AUDIO_MP3,
     AUDIO_ALSA
 } AudioKind;
 
 typedef struct Audio Audio;
 
-/* path: WAV file. want_alsa: open ALSA device (path or "default").
- * No silent synth fallback — returns NULL on failure. */
+/* path: WAV or MP3. want_alsa: open ALSA device (path or "default"). */
 Audio *audio_open(const char *path_or_device, int want_alsa);
 void   audio_close(Audio *a);
 int    audio_read(Audio *a, float *dst, int n);
